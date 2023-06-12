@@ -29,10 +29,13 @@ if not os.path.isdir(homefolder):
 OPTIONFILE = os.path.join(homefolder, "default.json")
 PYQT_MAX = 2147483647
 
+matplotlib.rcParams['axes.formatter.useoffset'] = False
+
+
 ### Functions for the FFT conversion
 def zeropadding(xs, ys):
 	if not len(xs):
-		return([], [])
+		return(np.array([]), np.array([]))
 	num_add = int(2**np.ceil(np.log2(len(xs)))-len(xs))
 	dt = xs[1] - xs[0] if len(xs) > 1 else 0
 	xs = np.pad(xs, (0, num_add), "linear_ramp", end_values=(0, xs[-1] + num_add*dt))
@@ -49,7 +52,7 @@ def calc_range(ys, margin=0.1):
 	return((ymin-margin*ydiff, ymax+margin*ydiff))
 
 WINDOWFUNCTIONS = ("hanning", "blackman", "hamming", "bartlett", "boxcar")
-def calc_window(windowtype, ys):
+def calc_window(windowtype, N):
 	functions = {
 		"hanning": np.hanning,
 		"blackman": np.blackman,
@@ -58,15 +61,34 @@ def calc_window(windowtype, ys):
 	}
 
 	if windowtype in functions:
-		return(functions[windowtype](len(ys)))
+		return(functions[windowtype](N))
 
-	return(np.ones(len(ys)))
+	return(np.ones(N))
 
 def calc_fft(data, config):
 	if data is None:
-		return([], [], [], [])
+		return(np.array([]), np.array([]), np.array([]), np.array([]))
+	data = data.copy()
 
-	time_xs, time_ys = data[:, 0], data[:, 1]
+	time_xs, time_yss = data[:, 0], data[:, 1:]
+	
+	number_of_phases = time_yss.shape[1]
+	if number_of_phases == 1:
+		time_ys = time_yss[:, 0]
+	elif number_of_phases == 4:
+		I = (time_yss[:, 0] - time_yss[:, 2]) / 2
+		Q = (time_yss[:, 3] - time_yss[:, 1]) / 2
+		time_ys = I + 1j * Q
+	elif number_of_phases == 8:
+		I = (time_yss[:, 0] - time_yss[:, 2] + time_yss[:, 4] - time_yss[:, 6]) / 4
+		Q = (time_yss[:, 3] - time_yss[:, 1] + time_yss[:, 7] - time_yss[:, 5]) / 4
+		time_ys = I + 1j * Q
+	else:
+		self.notification("The number of different phases has to be 1, 2, or 8 but was {number_of_phases}.")
+		return
+	
+	time_xs /= 10**config["tvaluesunit"]
+
 	fft_min, fft_max = config["windowstart"], config["windowstop"]
 
 	mask = (time_xs > fft_min) & (time_xs < fft_max)
@@ -75,22 +97,31 @@ def calc_fft(data, config):
 	if config["zeropad"]:
 		xs, ys = zeropadding(xs, ys)
 
-	window = calc_window(config["windowfunction"], ys)
+	xs *= 10**config["tvaluesunit"]
 
 	N = len(xs)
+	window = calc_window(config["windowfunction"], N)
 	if N:
 		spec_xs = np.fft.fftfreq(N, (min(xs)-max(xs))/N)
-		spec_ys = np.fft.fft(ys*window)
+		spec_xs /= 10**config["xvaluesunit"]
+		spec_ys = np.abs(np.fft.fft(ys*window))
 
-		# Only positive frequencies
-		mask = (spec_xs > 0)
-		spec_xs = spec_xs[mask]
-		spec_ys = abs(spec_ys[mask])
+
+		# @Luis: Change this to have both sidebands
+		spec_xs = np.fft.fftshift(spec_xs)
+		spec_ys = np.fft.fftshift(spec_ys)
+		
+		if config["localoscillator"]:
+			spec_xs += config["localoscillator"]
+		else:
+			mask = (spec_xs > 0)
+			spec_xs = spec_xs[mask]
+			spec_ys = spec_ys[mask]
 	else:
-		spec_xs = []
-		spec_ys = []
+		spec_xs = np.array([])
+		spec_ys = np.array([])
 
-	return(time_xs, time_ys, spec_xs, spec_ys)
+	return(time_xs, time_yss, spec_xs, spec_ys)
 
 
 ### GUI
@@ -149,6 +180,7 @@ class MainWindow(QMainWindow):
 			"savefigure_kwargs": {
 				"dpi": 600,
 			},
+			"samplerate": 1E+6,
 			"readfile_kwargs": {
 				"usecols": (3, 4),
 				"skip_header": 6,
@@ -164,7 +196,9 @@ class MainWindow(QMainWindow):
 			"zeropad": True,
 			"rescale": True,
 			"asksavename": False,
-			"xvaluesunit": 1E6,
+			"xvaluesunit": 6,
+			"tvaluesunit": -6,
+			"localoscillator": 0,
 		})
 
 		self.gui()
@@ -206,6 +240,8 @@ class MainWindow(QMainWindow):
 		filemenu.addAction(QQ(QAction, parent=self, text="&Open File", shortcut="Ctrl+O", tooltip="Open a new file", change=lambda x: self.open_file()))
 		filemenu.addAction(QQ(QAction, parent=self, text="&Save File", shortcut="Ctrl+S", tooltip="Save data to file", change=lambda x: self.save_file()))
 		filemenu.addSeparator()
+		filemenu.addAction(QQ(QAction, parent=self, text="&Open Set of Files", tooltip="Open multiple files all holding a single phase", change=lambda x: self.open_files_set()))
+		filemenu.addSeparator()
 		filemenu.addAction(QQ(QAction, parent=self, text="&Load Options", tooltip="Load option file", change=lambda x: self.readoptions()))
 		filemenu.addAction(QQ(QAction, parent=self, text="&Save Options", tooltip="Save options to file", change=lambda x: self.saveoptions()))
 		filemenu.addSeparator()
@@ -230,7 +266,7 @@ class MainWindow(QMainWindow):
 		self.plotcanvas.setMinimumWidth(200)
 		layout.addWidget(self.plotcanvas)
 		
-		self.config.register(["windowfunction", "windowstart", "windowstop", "zeropad"], self.update_data)
+		self.config.register(["windowfunction", "windowstart", "windowstop", "zeropad", "localoscillator", "samplerate"], self.update_data)
 		self.redrawplot.connect(self.fig.canvas.draw_idle)
 		
 		self.title_ax = self.fig.add_subplot(gs[0, :])
@@ -238,10 +274,11 @@ class MainWindow(QMainWindow):
 		self.title_ax.set_title("Press 'Open File' to load data")
 
 		self.ax0 = self.fig.add_subplot(gs[1, :])
-		self.timesignal_line = self.ax0.plot([], [], color="#FF0266", label="Time series")[0]
+		self.timesignal_lines = [self.ax0.plot([], [], color="#FF0266", label="Time series")[0]]
 		self.ax0.legend(loc = "upper right")
 		self.span = matplotlib.widgets.SpanSelector(self.ax0, self.onselect, interactive=True, drag_from_anywhere=True, direction="horizontal")
 		self.config.register(["windowstart", "windowstop"], self.setspan)
+		self.ax0.set_xlabel(f"Time [{unit_to_str(self.config['tvaluesunit'])}s]")
 
 		tmp_ax = self.fig.add_subplot(gs[2, :])
 		tmp_ax.axis("off")
@@ -249,6 +286,8 @@ class MainWindow(QMainWindow):
 		self.ax1 = self.fig.add_subplot(gs[3, :])
 		self.spectrum_line = self.ax1.plot([], [], color="#0336FF", label="Frequency Spectrum")[0]
 		self.ax1.legend(loc = "upper right")
+		self.ax1.set_xlabel(f"Frequency [{unit_to_str(self.config['xvaluesunit'])}Hz]")
+
 		
 		self.mpltoolbar = NavigationToolbar2QT(self.plotcanvas, self)
 		self.mpltoolbar.setVisible(self.config["mpltoolbar"])
@@ -261,7 +300,7 @@ class MainWindow(QMainWindow):
 		layout.addWidget(self.notificationarea)
 
 		button_layout = QGridLayout()
-		button_layout.setColumnStretch(2, 2)
+		button_layout.setColumnStretch(4, 2)
 		
 		button_layout.addWidget(QLabel("Window Function: "), 0, 0)
 		button_layout.addWidget(QQ(QComboBox, "windowfunction", options=WINDOWFUNCTIONS), 0, 1)
@@ -275,9 +314,18 @@ class MainWindow(QMainWindow):
 		button_layout.addWidget(QQ(QCheckBox, "zeropad", text="Zeropad"), 0, 2)
 		button_layout.addWidget(QQ(QCheckBox, "rescale", text="Rescale"), 1, 2)
 		
-		button_layout.addWidget(QQ(QPushButton, text="Reset", change=self.onreset), 0, 3)
-		button_layout.addWidget(QQ(QPushButton, text="Open File", change=self.open_file), 1, 3)
-		button_layout.addWidget(QQ(QPushButton, text="Save File", change=self.save_file), 2, 3)
+		tmp_layout = QHBoxLayout()
+		tmp_layout.addWidget(QQ(QLabel, text=f"LO [{unit_to_str(self.config['xvaluesunit'])}Hz]:"))
+		tmp_layout.addWidget(QQ(QDoubleSpinBox, "localoscillator", minWidth=80, range=(0, None)))
+		
+		button_layout.addLayout(tmp_layout, 2, 2)
+		
+		button_layout.addWidget(QQ(QLabel, text=f"Samplerate [Hz]:"), 3, 0)
+		button_layout.addWidget(QQ(QDoubleSpinBox, "samplerate", minWidth=80, range=(0, None)), 3, 1)
+		
+		button_layout.addWidget(QQ(QPushButton, text="Reset", change=lambda: self.onreset()), 0, 5)
+		button_layout.addWidget(QQ(QPushButton, text="Open File", change=lambda: self.open_file()), 1, 5)
+		button_layout.addWidget(QQ(QPushButton, text="Save File", change=lambda: self.save_file()), 2, 5)
 
 		layout.addLayout(button_layout)
 
@@ -293,12 +341,44 @@ class MainWindow(QMainWindow):
 			self.notification("No file was selected. Keeping current data.")
 			return
 		
-		self.data = np.genfromtxt(fname, **self.config["readfile_kwargs"])
+		_, ext = os.path.splitext(fname)
+		if ext == ".npz":
+			data = np.load(fname)
+			yss = data["data"]
+			if yss.shape[0] not in [1, 4, 8]:
+				self.notification(f"Number of datasets (phases) has to be 1, 4, or 8 but was {yss.shape[0]}.")
+				return
+			N = yss.shape[1]
+			xs = np.linspace(0, N, N) / self.config["samplerate"]
+			self.data = np.vstack((xs, *yss)).T
+		else:
+			self.data = np.genfromtxt(fname, **self.config["readfile_kwargs"])
+		
 		self.fname = fname
 		self.update_data()
 	
+	def open_files_set(self, fnames=None):
+		if fnames is None:
+			fnames, _ = QFileDialog.getOpenFileNames(None, 'Choose Files to open',"")
+		if not fnames:
+			self.notification("No files were selected. Keeping current data.")
+			return
+	
+		fnames = sorted(fnames)
+		yss = []
+		for fname in fnames:
+			ys = np.loadtxt(fname)
+			yss.append(ys)
+
+		N = len(yss[0])
+		xs = np.linspace(0, N, N) / self.config["samplerate"]
+		self.data = np.vstack((xs, *yss)).T
+		
+		self.fname = fnames[0]
+		self.update_data()
+	
 	def save_file(self, fname=None):
-		if self.data is None:
+		if self.spec_data is None:
 			self.notification("No data to save.")
 			return
 		
@@ -306,14 +386,14 @@ class MainWindow(QMainWindow):
 			fname, _ = QFileDialog.getSaveFileName(None, 'Choose File to Save to',"")
 		else:
 			fname = self.fname
+			tmp = os.path.splitext(fname)
+			fname = os.path.join(tmp[0], "FFT", tmp[1])
 		
 		if not fname:
 			self.notification("No filename specified for saving.")
 			return
 
-		
-		data = self.spec_data.copy()
-		data[:,0] /= self.config["xvaluesunit"]
+		data = self.spec_data
 		
 		header = f"Window: {self.config['windowfunction']} from {self.config['windowstart']} to {self.config['windowstop']}\nZeropadding: {self.config['zeropad']}"
 		basename, extension = os.path.splitext(fname)
@@ -379,17 +459,34 @@ class MainWindow(QMainWindow):
 		
 		try:
 			breakpoint(ownid, self.update_data_thread)
-		
-			xs, ys, spec_xs, spec_ys = calc_fft(self.data, self.config)
+			time_xs, time_yss, spec_xs, spec_ys = calc_fft(self.data, self.config)
+			
 			breakpoint(ownid, self.update_data_thread)
 			self.spec_data = np.vstack((spec_xs, spec_ys)).T
-			self.timesignal_line.set_data(xs, ys)
+			
+			number_of_datasets = time_yss.shape[1]
+			
+			for line in self.timesignal_lines:
+				line.remove()
+			self.timesignal_lines = []
+			
+			while len(self.timesignal_lines) < number_of_datasets:
+				self.timesignal_lines.append(self.ax0.plot([], [])[0])
+			
+			colors = ["#fbd206", "#feaf8a", "#cc89d6", "#bfcff0", "#9ce7c9", "#4dc656", "#D1BDFF", "#fd7a8c", ]
+			
+			for i, (line, time_ys, color) in enumerate(zip(self.timesignal_lines, time_yss.T, colors)):
+				line.set_data(time_xs, time_ys)
+				line.set_color(color)
+				line.set_label(f"Time series {i}")
+			self.ax0.legend(loc = "upper right")
+			
 			self.spectrum_line.set_data(spec_xs, spec_ys)
 			breakpoint(ownid, self.update_data_thread)
 
 			if config["rescale"] or force_rescale:
-				self.ax0.set_xlim(calc_range(xs, margin=0))
-				self.ax0.set_ylim(calc_range(ys))
+				self.ax0.set_xlim(calc_range(time_xs, margin=0))
+				self.ax0.set_ylim(calc_range(time_ys))
 
 				self.ax1.set_xlim(calc_range(spec_xs, margin=0))
 				self.ax1.set_ylim(calc_range(spec_ys))
@@ -587,6 +684,28 @@ def breakpoint(ownid, lastid):
 def except_hook(cls, exception, traceback):
 	sys.__excepthook__(cls, exception, traceback)
 	window.notification(f"{exception}\n{''.join(tb.format_tb(traceback))}")
+
+def unit_to_str(exponent):
+	if exponent in UNITS:
+		return(UNITS[exponent])
+	else:
+		return(f"1E{exponent:.0f}")
+
+UNITS = {
+	0: "",
+	3: "k",
+	6: "M",
+	9: "G",
+	12: "T",
+	15: "P",
+	18: "E",
+	-3: "m",
+	-6: "µ",
+	-9: "n",
+	-12: "p",
+	-15: "f",
+	-18: "a",
+}
 
 
 def start():
