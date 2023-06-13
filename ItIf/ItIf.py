@@ -30,6 +30,7 @@ OPTIONFILE = os.path.join(homefolder, "default.json")
 PYQT_MAX = 2147483647
 
 matplotlib.rcParams['axes.formatter.useoffset'] = False
+matplotlib.rcParams['patch.facecolor'] = "blue"
 
 
 ### Functions for the FFT conversion
@@ -67,7 +68,7 @@ def calc_window(windowtype, N):
 
 def calc_fft(data, config):
 	if data is None:
-		return(np.array([]), np.array([]), np.array([]), np.array([]))
+		return(np.array([]), np.array([[]]), np.array([]), np.array([]))
 	data = data.copy()
 
 	time_xs, time_yss = data[:, 0], data[:, 1:]
@@ -112,7 +113,7 @@ def calc_fft(data, config):
 		spec_ys = np.fft.fftshift(spec_ys)
 		
 		if config["localoscillator"]:
-			spec_xs += config["localoscillator"]
+			spec_xs += config["localoscillator"] * 10**(config["lovaluesunit"] - config["xvaluesunit"])
 		else:
 			mask = (spec_xs > 0)
 			spec_xs = spec_xs[mask]
@@ -180,7 +181,7 @@ class MainWindow(QMainWindow):
 			"savefigure_kwargs": {
 				"dpi": 600,
 			},
-			"samplerate": 1E+6,
+			"samplerate": 1,
 			"readfile_kwargs": {
 				"usecols": (3, 4),
 				"skip_header": 6,
@@ -197,8 +198,10 @@ class MainWindow(QMainWindow):
 			"rescale": True,
 			"asksavename": False,
 			"xvaluesunit": 6,
-			"tvaluesunit": -6,
-			"localoscillator": 0,
+			"tvaluesunit": -6,\
+			"lovaluesunit": 9,
+			"localoscillator": 8,
+			"samplerateunit": 6,
 		})
 
 		self.gui()
@@ -266,7 +269,10 @@ class MainWindow(QMainWindow):
 		self.plotcanvas.setMinimumWidth(200)
 		layout.addWidget(self.plotcanvas)
 		
-		self.config.register(["windowfunction", "windowstart", "windowstop", "zeropad", "localoscillator", "samplerate"], self.update_data)
+		self.config.register([
+			"windowfunction", "windowstart", "windowstop", "zeropad", "localoscillator",
+			"samplerate", "xvaluesunit", "tvaluesunit", "lovaluesunit", "samplerateunit",
+			], self.update_data)
 		self.redrawplot.connect(self.fig.canvas.draw_idle)
 		
 		self.title_ax = self.fig.add_subplot(gs[0, :])
@@ -276,7 +282,7 @@ class MainWindow(QMainWindow):
 		self.ax0 = self.fig.add_subplot(gs[1, :])
 		self.timesignal_lines = [self.ax0.plot([], [], color="#FF0266", label="Time series")[0]]
 		self.ax0.legend(loc = "upper right")
-		self.span = matplotlib.widgets.SpanSelector(self.ax0, self.onselect, interactive=True, drag_from_anywhere=True, direction="horizontal")
+		self.span = matplotlib.widgets.SpanSelector(self.ax0, self.onselect, interactive=True, drag_from_anywhere=True, direction="horizontal", props=dict(facecolor="#00000040"))
 		self.config.register(["windowstart", "windowstop"], self.setspan)
 		self.ax0.set_xlabel(f"Time [{unit_to_str(self.config['tvaluesunit'])}s]")
 
@@ -300,7 +306,7 @@ class MainWindow(QMainWindow):
 		layout.addWidget(self.notificationarea)
 
 		button_layout = QGridLayout()
-		button_layout.setColumnStretch(4, 2)
+		button_layout.setColumnStretch(5, 2)
 		
 		button_layout.addWidget(QLabel("Window Function: "), 0, 0)
 		button_layout.addWidget(QQ(QComboBox, "windowfunction", options=WINDOWFUNCTIONS), 0, 1)
@@ -311,21 +317,18 @@ class MainWindow(QMainWindow):
 		button_layout.addWidget(QLabel("Window Stop: "), 2, 0)
 		button_layout.addWidget(QQ(QDoubleSpinBox, "windowstop", range=(None, None)), 2, 1)
 		
-		button_layout.addWidget(QQ(QCheckBox, "zeropad", text="Zeropad"), 0, 2)
-		button_layout.addWidget(QQ(QCheckBox, "rescale", text="Rescale"), 1, 2)
+		button_layout.addWidget(QQ(QCheckBox, "zeropad", text="Zeropad"), 0, 4)
+		button_layout.addWidget(QQ(QCheckBox, "rescale", text="Rescale"), 1, 4)
 		
-		tmp_layout = QHBoxLayout()
-		tmp_layout.addWidget(QQ(QLabel, text=f"LO [{unit_to_str(self.config['xvaluesunit'])}Hz]:"))
-		tmp_layout.addWidget(QQ(QDoubleSpinBox, "localoscillator", minWidth=80, range=(0, None)))
+		button_layout.addWidget(QQ(QLabel, text=f"Samplerate [{unit_to_str(self.config['samplerateunit'])}Hz]:"), 0, 2)
+		button_layout.addWidget(QQ(QDoubleSpinBox, "samplerate", minWidth=80, range=(0, None)), 0, 3)
 		
-		button_layout.addLayout(tmp_layout, 2, 2)
+		button_layout.addWidget(QQ(QLabel, text=f"LO [{unit_to_str(self.config['lovaluesunit'])}Hz]:"), 1, 2)
+		button_layout.addWidget(QQ(QDoubleSpinBox, "localoscillator", minWidth=80, range=(0, None)), 1, 3)
 		
-		button_layout.addWidget(QQ(QLabel, text=f"Samplerate [Hz]:"), 3, 0)
-		button_layout.addWidget(QQ(QDoubleSpinBox, "samplerate", minWidth=80, range=(0, None)), 3, 1)
-		
-		button_layout.addWidget(QQ(QPushButton, text="Reset", change=lambda: self.onreset()), 0, 5)
-		button_layout.addWidget(QQ(QPushButton, text="Open File", change=lambda: self.open_file()), 1, 5)
-		button_layout.addWidget(QQ(QPushButton, text="Save File", change=lambda: self.save_file()), 2, 5)
+		button_layout.addWidget(QQ(QPushButton, text="Reset", change=lambda: self.onreset()), 0, 6)
+		button_layout.addWidget(QQ(QPushButton, text="Open File", change=lambda: self.open_file()), 1, 6)
+		button_layout.addWidget(QQ(QPushButton, text="Save File", change=lambda: self.save_file()), 2, 6)
 
 		layout.addLayout(button_layout)
 
@@ -349,7 +352,7 @@ class MainWindow(QMainWindow):
 				self.notification(f"Number of datasets (phases) has to be 1, 4, or 8 but was {yss.shape[0]}.")
 				return
 			N = yss.shape[1]
-			xs = np.linspace(0, N, N) / self.config["samplerate"]
+			xs = np.linspace(0, N, N) / (self.config["samplerate"] * 10**self.config["samplerateunit"])
 			self.data = np.vstack((xs, *yss)).T
 		else:
 			self.data = np.genfromtxt(fname, **self.config["readfile_kwargs"])
@@ -458,6 +461,8 @@ class MainWindow(QMainWindow):
 			ownid = threading.current_thread().ident
 		
 		try:
+			if self.data is None:
+				return
 			breakpoint(ownid, self.update_data_thread)
 			time_xs, time_yss, spec_xs, spec_ys = calc_fft(self.data, self.config)
 			
@@ -470,15 +475,10 @@ class MainWindow(QMainWindow):
 				line.remove()
 			self.timesignal_lines = []
 			
-			while len(self.timesignal_lines) < number_of_datasets:
-				self.timesignal_lines.append(self.ax0.plot([], [])[0])
-			
 			colors = ["#fbd206", "#feaf8a", "#cc89d6", "#bfcff0", "#9ce7c9", "#4dc656", "#D1BDFF", "#fd7a8c", ]
 			
-			for i, (line, time_ys, color) in enumerate(zip(self.timesignal_lines, time_yss.T, colors)):
-				line.set_data(time_xs, time_ys)
-				line.set_color(color)
-				line.set_label(f"Time series {i}")
+			for i, (time_ys, color) in enumerate(zip(time_yss.T, colors)):
+				self.timesignal_lines.append(self.ax0.plot(time_xs, time_ys, color=color, label=f"Series {i}")[0])
 			self.ax0.legend(loc = "upper right")
 			
 			self.spectrum_line.set_data(spec_xs, spec_ys)
@@ -486,7 +486,7 @@ class MainWindow(QMainWindow):
 
 			if config["rescale"] or force_rescale:
 				self.ax0.set_xlim(calc_range(time_xs, margin=0))
-				self.ax0.set_ylim(calc_range(time_ys))
+				self.ax0.set_ylim(calc_range(time_yss))
 
 				self.ax1.set_xlim(calc_range(spec_xs, margin=0))
 				self.ax1.set_ylim(calc_range(spec_ys))
