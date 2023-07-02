@@ -91,6 +91,8 @@ def calc_fft(data, config):
 	time_xs /= 10**config["tvaluesunit"]
 
 	fft_min, fft_max = config["windowstart"], config["windowstop"]
+	if fft_min > fft_max:
+		fft_min, fft_max = fft_max, fft_min
 
 	mask = (time_xs > fft_min) & (time_xs < fft_max)
 	xs, ys = time_xs[mask], time_ys[mask]
@@ -118,6 +120,13 @@ def calc_fft(data, config):
 			mask = (spec_xs > 0)
 			spec_xs = spec_xs[mask]
 			spec_ys = spec_ys[mask]
+		
+		if config["limitfrequencies"]:
+			xmin, xmax = config["frequencystart"], config["frequencystop"]
+			mask = (spec_xs > xmin) & (spec_xs < xmax)
+			spec_xs = spec_xs[mask]
+			spec_ys = spec_ys[mask]
+		
 	else:
 		spec_xs = np.array([])
 		spec_ys = np.array([])
@@ -174,39 +183,48 @@ class MainWindow(QMainWindow):
 		self.update_data_lock = threading.RLock()
 		
 		self.data = None
+		self.ts_are_calculated = False
 		self.spec_data = None
 		self.fname = None
 
 		config = self.config = Config(self.updateconfig, {
+			"mpltoolbar": True,
 			"savefigure_kwargs": {
 				"dpi": 600,
 			},
-			"samplerate": 1,
 			"readfile_kwargs": {
 				"usecols": (3, 4),
 				"skip_header": 6,
 				"delimiter": ",",
 			},
+			"asksavename": False,
 			"savefile_kwargs": {
 				"delimiter": "\t",
 			},
-			"mpltoolbar": True,
+			
 			"windowfunction": WINDOWFUNCTIONS[0],
 			"windowstart": 0,
 			"windowstop": 0,
+			"limitfrequencies": False,
+			"frequencystart": 0,
+			"frequencystop": 30,
 			"zeropad": True,
 			"rescale": True,
-			"asksavename": False,
-			"xvaluesunit": 6,
-			"tvaluesunit": -6,\
+			"localoscillator": 0,
+			"samplerate": 8,
+			
+			"xvaluesunit": 9,
+			"tvaluesunit": -6,
 			"lovaluesunit": 9,
-			"localoscillator": 8,
-			"samplerateunit": 6,
+			"samplerateunit": 9,
 		})
 
 		self.gui()
 		self.setWindowTitle("Time Signal to Frequency Spectrum")
 		self.readoptions(OPTIONFILE, ignore=True)
+		
+		for widget, (key, textcreator) in self.dynamic_labels.items():
+			widget.setText(textcreator())
 		self.show()
 
 	def dragEnterEvent(self, event):
@@ -255,13 +273,21 @@ class MainWindow(QMainWindow):
 		actionmenu.addSeparator()
 		actionmenu.addAction(QQ(QAction, "mpltoolbar", parent=self, text="&Show MPL Toolbar", tooltip="Show or hide matplotlib toolbar", checkable=True))
 		actionmenu.addSeparator()
+		actionmenu.addAction(QQ(QAction, "rescale", parent=self, text="&Rescale Spectra", tooltip="Rescale spectra when data changes", checkable=True))
+		actionmenu.addSeparator()
 		actionmenu.addAction(QQ(QAction, parent=self, text="&Save Figure", tooltip="Save the figure", change=lambda x: self.savefigure()))
+
+	def update_frequency_widgets(self):
+		enabled = self.config["limitfrequencies"]
+		for widget in self.frequency_widgets:
+			widget.setEnabled(enabled)
 
 	def gui(self):
 		self.gui_menu()
 	
 		layout = QVBoxLayout()
-		
+		self.dynamic_labels = {}
+
 		self.fig = figure.Figure()
 		gs = gridspec.GridSpec(4, 1, height_ratios = [0.25, 1, 0.5, 1], hspace = 0, wspace=0)
 		self.plotcanvas = FigureCanvas(self.fig)
@@ -271,8 +297,11 @@ class MainWindow(QMainWindow):
 		
 		self.config.register([
 			"windowfunction", "windowstart", "windowstop", "zeropad", "localoscillator",
-			"samplerate", "xvaluesunit", "tvaluesunit", "lovaluesunit", "samplerateunit",
+			"xvaluesunit", "tvaluesunit", "lovaluesunit", "limitfrequencies", "frequencystart", "frequencystop",
 			], self.update_data)
+		
+		self.config.register(["samplerate", "samplerateunit"], self.update_samplerate)
+		
 		self.redrawplot.connect(self.fig.canvas.draw_idle)
 		
 		self.title_ax = self.fig.add_subplot(gs[0, :])
@@ -286,6 +315,8 @@ class MainWindow(QMainWindow):
 		self.config.register(["windowstart", "windowstop"], self.setspan)
 		self.ax0.set_xlabel(f"Time [{unit_to_str(self.config['tvaluesunit'])}s]")
 
+		self.config.register("tvaluesunit", lambda: self.ax0.set_xlabel(f"Time [{unit_to_str(self.config['tvaluesunit'])}s]"))
+
 		tmp_ax = self.fig.add_subplot(gs[2, :])
 		tmp_ax.axis("off")
 
@@ -294,6 +325,7 @@ class MainWindow(QMainWindow):
 		self.ax1.legend(loc = "upper right")
 		self.ax1.set_xlabel(f"Frequency [{unit_to_str(self.config['xvaluesunit'])}Hz]")
 
+		self.config.register("xvaluesunit", lambda: self.ax1.set_xlabel(f"Frequency [{unit_to_str(self.config['xvaluesunit'])}Hz]"))
 		
 		self.mpltoolbar = NavigationToolbar2QT(self.plotcanvas, self)
 		self.mpltoolbar.setVisible(self.config["mpltoolbar"])
@@ -306,29 +338,73 @@ class MainWindow(QMainWindow):
 		layout.addWidget(self.notificationarea)
 
 		button_layout = QGridLayout()
-		button_layout.setColumnStretch(5, 2)
 		
-		button_layout.addWidget(QLabel("Window Function: "), 0, 0)
-		button_layout.addWidget(QQ(QComboBox, "windowfunction", options=WINDOWFUNCTIONS), 0, 1)
+		column_index = 0
+		
+		button_layout.addWidget(QLabel("Window Function: "), 0, column_index)
+		button_layout.addWidget(QQ(QComboBox, "windowfunction", options=WINDOWFUNCTIONS), 0, column_index+1)
 
-		button_layout.addWidget(QLabel("Window Start: "), 1, 0)
-		button_layout.addWidget(QQ(QDoubleSpinBox, "windowstart", range=(None, None)), 1, 1)
+		
+		tmp = QLabel()
+		self.dynamic_labels[tmp] = ("tvaluesunit", lambda: f"Window Start [{unit_to_str(self.config['tvaluesunit'])}s]: ")
+		button_layout.addWidget(tmp, 1, column_index)
+		button_layout.addWidget(QQ(QDoubleSpinBox, "windowstart", minWidth=80, range=(None, None)), 1, column_index+1)
 
-		button_layout.addWidget(QLabel("Window Stop: "), 2, 0)
-		button_layout.addWidget(QQ(QDoubleSpinBox, "windowstop", range=(None, None)), 2, 1)
+		tmp = QLabel()
+		self.dynamic_labels[tmp] = ("tvaluesunit", lambda: f"Window Stop [{unit_to_str(self.config['tvaluesunit'])}s]: ")
+		button_layout.addWidget(tmp, 2, column_index)
+		button_layout.addWidget(QQ(QDoubleSpinBox, "windowstop", minWidth=80, range=(None, None)), 2, column_index+1)
 		
-		button_layout.addWidget(QQ(QCheckBox, "zeropad", text="Zeropad"), 0, 4)
-		button_layout.addWidget(QQ(QCheckBox, "rescale", text="Rescale"), 1, 4)
+		column_index += 2
 		
-		button_layout.addWidget(QQ(QLabel, text=f"Samplerate [{unit_to_str(self.config['samplerateunit'])}Hz]:"), 0, 2)
-		button_layout.addWidget(QQ(QDoubleSpinBox, "samplerate", minWidth=80, range=(0, None)), 0, 3)
+		button_layout.addWidget(QQ(QCheckBox, "zeropad", text="Zeropad"), 0, column_index)
 		
-		button_layout.addWidget(QQ(QLabel, text=f"LO [{unit_to_str(self.config['lovaluesunit'])}Hz]:"), 1, 2)
-		button_layout.addWidget(QQ(QDoubleSpinBox, "localoscillator", minWidth=80, range=(0, None)), 1, 3)
+		tmp = QLabel()
+		self.dynamic_labels[tmp] = ("samplerateunit", lambda: f"Samplerate [{unit_to_str(self.config['samplerateunit'])}Hz]:")
+		button_layout.addWidget(tmp, 1, column_index)
+		button_layout.addWidget(QQ(QDoubleSpinBox, "samplerate", minWidth=80, range=(0, None)), 1, column_index+1)
 		
-		button_layout.addWidget(QQ(QPushButton, text="Reset", change=lambda: self.onreset()), 0, 6)
-		button_layout.addWidget(QQ(QPushButton, text="Open File", change=lambda: self.open_file()), 1, 6)
-		button_layout.addWidget(QQ(QPushButton, text="Save File", change=lambda: self.save_file()), 2, 6)
+		tmp = QLabel()
+		self.dynamic_labels[tmp] = ("lovaluesunit", lambda: f"LO [{unit_to_str(self.config['lovaluesunit'])}Hz]:")
+		button_layout.addWidget(tmp, 2, column_index)
+		button_layout.addWidget(QQ(QDoubleSpinBox, "localoscillator", minWidth=80, range=(0, None)), 2, column_index+1)
+		
+		column_index += 2
+		
+		
+		button_layout.addWidget(QQ(QCheckBox, "limitfrequencies", text="Limit Frequencies"), 0, column_index, 1, 2)
+
+		self.frequency_widgets = []
+		
+		tmp = QLabel()
+		self.dynamic_labels[tmp] = ("xvaluesunit", lambda: f"Frequency Start [{unit_to_str(self.config['xvaluesunit'])}Hz]: ")
+		self.frequency_widgets.append(tmp)
+		button_layout.addWidget(tmp, 1, column_index)
+		tmp = QQ(QDoubleSpinBox, "frequencystart", minWidth=80, range=(None, None))
+		self.frequency_widgets.append(tmp)
+		button_layout.addWidget(tmp, 1, column_index+1)
+
+		tmp = QLabel()
+		self.dynamic_labels[tmp] = ("xvaluesunit", lambda: f"Frequency Stop [{unit_to_str(self.config['xvaluesunit'])}Hz]: ")
+		self.frequency_widgets.append(tmp)
+		button_layout.addWidget(tmp, 2, column_index)
+		tmp = QQ(QDoubleSpinBox, "frequencystop", minWidth=80, range=(None, None))
+		self.frequency_widgets.append(tmp)
+		button_layout.addWidget(tmp, 2, column_index+1)
+		
+		self.config.register("limitfrequencies", self.update_frequency_widgets)
+		self.update_frequency_widgets()
+
+		
+		column_index += 2
+		
+		button_layout.setColumnStretch(column_index, 2)
+		
+		column_index += 1
+		
+		button_layout.addWidget(QQ(QPushButton, text="Reset", change=lambda: self.onreset()), 0, column_index)
+		button_layout.addWidget(QQ(QPushButton, text="Open File", change=lambda: self.open_file()), 1, column_index)
+		button_layout.addWidget(QQ(QPushButton, text="Save File", change=lambda: self.save_file()), 2, column_index)
 
 		layout.addLayout(button_layout)
 
@@ -336,6 +412,8 @@ class MainWindow(QMainWindow):
 		self.setCentralWidget(widget)
 		widget.setLayout(layout)
 
+		for widget, (key, textcreator) in self.dynamic_labels.items():
+			self.config.register(key, lambda widget=widget, textcreator=textcreator: widget.setText(textcreator()))
 
 	def open_file(self, fname=None):
 		if fname is None:
@@ -352,10 +430,13 @@ class MainWindow(QMainWindow):
 				self.notification(f"Number of datasets (phases) has to be 1, 4, or 8 but was {yss.shape[0]}.")
 				return
 			N = yss.shape[1]
-			xs = np.linspace(0, N, N) / (self.config["samplerate"] * 10**self.config["samplerateunit"])
+			
+			xs = self.create_xs(N)
 			self.data = np.vstack((xs, *yss)).T
+			self.ts_are_calculated = True
 		else:
 			self.data = np.genfromtxt(fname, **self.config["readfile_kwargs"])
+			self.ts_are_calculated = False
 		
 		self.fname = fname
 		self.update_data()
@@ -374,23 +455,28 @@ class MainWindow(QMainWindow):
 			yss.append(ys)
 
 		N = len(yss[0])
-		xs = np.linspace(0, N, N) / self.config["samplerate"]
+		xs = self.create_xs(N)
 		self.data = np.vstack((xs, *yss)).T
+		self.ts_are_calculated = True
 		
 		self.fname = fnames[0]
 		self.update_data()
 	
+	def create_xs(self, N):
+		xs = np.linspace(0, N, N) / (self.config["samplerate"] * 10**self.config["samplerateunit"])
+		return(xs)
+		
 	def save_file(self, fname=None):
 		if self.spec_data is None:
 			self.notification("No data to save.")
 			return
 		
 		if self.config["asksavename"]:
-			fname, _ = QFileDialog.getSaveFileName(None, 'Choose File to Save to',"")
+			savename, _ = QFileDialog.getSaveFileName(None, 'Choose File to Save to',"")
 		else:
 			fname = self.fname
-			tmp = os.path.splitext(fname)
-			fname = os.path.join(tmp[0], "FFT", tmp[1])
+			basename, extension = os.path.splitext(fname)
+			savename = basename + "FFT" + extension
 		
 		if not fname:
 			self.notification("No filename specified for saving.")
@@ -399,8 +485,7 @@ class MainWindow(QMainWindow):
 		data = self.spec_data
 		
 		header = f"Window: {self.config['windowfunction']} from {self.config['windowstart']} to {self.config['windowstop']}\nZeropadding: {self.config['zeropad']}"
-		basename, extension = os.path.splitext(fname)
-		np.savetxt(basename + "FFT" + extension, data, header=header, **self.config["savefile_kwargs"])
+		np.savetxt(savename, data, header=header, **self.config["savefile_kwargs"])
 		self.notification(f"Saved data successfully to '{fname}'")
 
 	def notification(self, text):
@@ -437,7 +522,8 @@ class MainWindow(QMainWindow):
 
 		with open(filename, "r") as optionfile:
 			values = json.load(optionfile)
-		self.config.update(values)
+		for key, value in values.items():
+			self.config[key] = value
 		self.notification("Options have been loaded")
 
 
@@ -448,6 +534,12 @@ class MainWindow(QMainWindow):
 		
 		self.fig.savefig(fname, **config["savefigure_kwargs"])
 
+	def update_samplerate(self):
+		if not self.ts_are_calculated:
+			return
+		self.data[:, 0] = self.create_xs(len(self.data[:, 0]))
+		
+		self.update_data()
 
 	def update_data(self, force_rescale=False):
 		thread = threading.Thread(target=self.update_data_core, args=(force_rescale, ))
