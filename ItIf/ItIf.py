@@ -220,7 +220,7 @@ class MainWindow(QMainWindow):
             "localoscillator": 0,
             "samplerate": 8,
             
-            "xvaluesunit": 9,
+            "xvaluesunit": 6,
             "tvaluesunit": -6,
             "lovaluesunit": 9,
             "samplerateunit": 9,
