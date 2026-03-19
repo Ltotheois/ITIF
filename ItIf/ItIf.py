@@ -74,28 +74,31 @@ def calc_window(windowtype, N):
 
     return(np.ones(N))
 
+def create_xs(N, config):
+    xs = np.arange(N) / (config["samplerate"] * 10**config["samplerateunit"])
+    return(xs)
+
 def calc_fft(data, config):
     if data is None:
         return(np.array([]), np.array([[]]), np.array([]), np.array([]))
     data = data.copy()
-
-    time_xs, time_yss = data[:, 0], data[:, 1:]
     
-    number_of_phases = time_yss.shape[1]
+    number_of_phases = data.shape[1]
     if number_of_phases == 1:
-        time_ys = time_yss[:, 0]
+        time_ys = data[:, 0]
     elif number_of_phases == 4:
-        I = (time_yss[:, 0] - time_yss[:, 2]) / 2
-        Q = (time_yss[:, 3] - time_yss[:, 1]) / 2
+        I = (data[:, 0] - data[:, 2]) / 2
+        Q = (data[:, 3] - data[:, 1]) / 2
         time_ys = I + 1j * Q
     elif number_of_phases == 8:
-        I = (time_yss[:, 0] - time_yss[:, 2] + time_yss[:, 4] - time_yss[:, 6]) / 4
-        Q = (time_yss[:, 3] - time_yss[:, 1] + time_yss[:, 7] - time_yss[:, 5]) / 4
+        I = (data[:, 0] - data[:, 2] + data[:, 4] - data[:, 6]) / 4
+        Q = (data[:, 3] - data[:, 1] + data[:, 7] - data[:, 5]) / 4
         time_ys = I + 1j * Q
     else:
-        self.notification("The number of different phases has to be 1, 2, or 8 but was {number_of_phases}.")
+        raise ValueError(f"The number of different phases has to be 1, 2, or 8 but was {number_of_phases}.")
         return
     
+    time_xs = create_xs(len(time_ys), config)
     time_xs /= 10**config["tvaluesunit"]
 
     fft_min, fft_max = config["windowstart"], config["windowstop"]
@@ -108,11 +111,10 @@ def calc_fft(data, config):
     xs, ys = zeropadding(xs, ys, config["zeropad"])
 
     xs *= 10**config["tvaluesunit"]
-
     N = len(xs)
     window = calc_window(config["windowfunction"], N)
     if N:
-        spec_xs = np.fft.fftfreq(N, (min(xs)-max(xs))/N)
+        spec_xs = np.fft.fftfreq(N, 1 / (config["samplerate"] * 10**config["samplerateunit"]))
         spec_xs /= 10**config["xvaluesunit"]
         spec_ys = np.abs(np.fft.fft(ys*window))
 
@@ -138,7 +140,7 @@ def calc_fft(data, config):
         spec_xs = np.array([])
         spec_ys = np.array([])
 
-    return(time_xs, time_yss, spec_xs, spec_ys)
+    return(time_xs, data, spec_xs, spec_ys)
 
 
 ### GUI
@@ -190,7 +192,6 @@ class MainWindow(QMainWindow):
         self.update_data_lock = threading.RLock()
         
         self.data = None
-        self.ts_are_calculated = False
         self.spec_data = None
         self.fname = None
 
@@ -200,9 +201,10 @@ class MainWindow(QMainWindow):
                 "dpi": 600,
             },
             "readfile_kwargs": {
-                "usecols": (3, 4),
+                "usecols": (4, ),
                 "skip_header": 6,
                 "delimiter": ",",
+                "ndmin": 2,
             },
             "asksavename": False,
             "savefile_kwargs": {
@@ -215,10 +217,10 @@ class MainWindow(QMainWindow):
             "limitfrequencies": False,
             "frequencystart": 0,
             "frequencystop": 30,
-            "zeropad": 0,
+            "zeropad": -1,
             "rescale": True,
             "localoscillator": 0,
-            "samplerate": 8,
+            "samplerate": 50,
             
             "xvaluesunit": 6,
             "tvaluesunit": -6,
@@ -349,33 +351,33 @@ class MainWindow(QMainWindow):
         column_index = 0
         
         button_layout.addWidget(QLabel("Window Function: "), 0, column_index)
-        button_layout.addWidget(QQ(QComboBox, "windowfunction", options=WINDOWFUNCTIONS), 0, column_index+1)
+        button_layout.addWidget(QQ(QComboBox, "windowfunction", options=WINDOWFUNCTIONS, minWidth=120), 0, column_index+1)
 
         
         tmp = QLabel()
         self.dynamic_labels[tmp] = ("tvaluesunit", lambda: f"Window Start [{unit_to_str(self.config['tvaluesunit'])}s]: ")
         button_layout.addWidget(tmp, 1, column_index)
-        button_layout.addWidget(QQ(QDoubleSpinBox, "windowstart", minWidth=80, range=(None, None)), 1, column_index+1)
+        button_layout.addWidget(QQ(QDoubleSpinBox, "windowstart", minWidth=120, range=(None, None)), 1, column_index+1)
 
         tmp = QLabel()
         self.dynamic_labels[tmp] = ("tvaluesunit", lambda: f"Window Stop [{unit_to_str(self.config['tvaluesunit'])}s]: ")
         button_layout.addWidget(tmp, 2, column_index)
-        button_layout.addWidget(QQ(QDoubleSpinBox, "windowstop", minWidth=80, range=(None, None)), 2, column_index+1)
+        button_layout.addWidget(QQ(QDoubleSpinBox, "windowstop", minWidth=120, range=(None, None)), 2, column_index+1)
         
         column_index += 2
 
         button_layout.addWidget(QQ(QLabel, text="Zeropadding"), 0, column_index)
-        button_layout.addWidget(QQ(QSpinBox, "zeropad", range=(-1, None)), 0, column_index+1)
+        button_layout.addWidget(QQ(QSpinBox, "zeropad", range=(-1, None), minWidth=120), 0, column_index+1)
         
         tmp = QLabel()
         self.dynamic_labels[tmp] = ("samplerateunit", lambda: f"Samplerate [{unit_to_str(self.config['samplerateunit'])}Hz]:")
         button_layout.addWidget(tmp, 1, column_index)
-        button_layout.addWidget(QQ(QDoubleSpinBox, "samplerate", minWidth=80, range=(0, None)), 1, column_index+1)
+        button_layout.addWidget(QQ(QDoubleSpinBox, "samplerate", minWidth=120, range=(0, None)), 1, column_index+1)
         
         tmp = QLabel()
         self.dynamic_labels[tmp] = ("lovaluesunit", lambda: f"LO [{unit_to_str(self.config['lovaluesunit'])}Hz]:")
         button_layout.addWidget(tmp, 2, column_index)
-        button_layout.addWidget(QQ(QDoubleSpinBox, "localoscillator", minWidth=80, range=(0, None)), 2, column_index+1)
+        button_layout.addWidget(QQ(QDoubleSpinBox, "localoscillator", minWidth=120, range=(0, None)), 2, column_index+1)
         
         column_index += 2
         
@@ -388,7 +390,7 @@ class MainWindow(QMainWindow):
         self.dynamic_labels[tmp] = ("xvaluesunit", lambda: f"Frequency Start [{unit_to_str(self.config['xvaluesunit'])}Hz]: ")
         self.frequency_widgets.append(tmp)
         button_layout.addWidget(tmp, 1, column_index)
-        tmp = QQ(QDoubleSpinBox, "frequencystart", minWidth=80, range=(None, None))
+        tmp = QQ(QDoubleSpinBox, "frequencystart", minWidth=120, range=(None, None))
         self.frequency_widgets.append(tmp)
         button_layout.addWidget(tmp, 1, column_index+1)
 
@@ -396,7 +398,7 @@ class MainWindow(QMainWindow):
         self.dynamic_labels[tmp] = ("xvaluesunit", lambda: f"Frequency Stop [{unit_to_str(self.config['xvaluesunit'])}Hz]: ")
         self.frequency_widgets.append(tmp)
         button_layout.addWidget(tmp, 2, column_index)
-        tmp = QQ(QDoubleSpinBox, "frequencystop", minWidth=80, range=(None, None))
+        tmp = QQ(QDoubleSpinBox, "frequencystop", minWidth=120, range=(None, None))
         self.frequency_widgets.append(tmp)
         button_layout.addWidget(tmp, 2, column_index+1)
         
@@ -435,16 +437,11 @@ class MainWindow(QMainWindow):
             data = np.load(fname)
             yss = data["data"]
             if yss.shape[0] not in [1, 4, 8]:
-                self.notification(f"Number of datasets (phases) has to be 1, 4, or 8 but was {yss.shape[0]}.")
-                return
-            N = yss.shape[1]
+                raise NotImplementedError(f"Number of datasets (phases) has to be 1, 4, or 8 but was {yss.shape[0]}.")
             
-            xs = self.create_xs(N)
-            self.data = np.vstack((xs, *yss)).T
-            self.ts_are_calculated = True
+            self.data = np.array(yss).T
         else:
             self.data = np.genfromtxt(fname, **self.config["readfile_kwargs"])
-            self.ts_are_calculated = False
         
         self.fname = fname
         self.update_data()
@@ -462,17 +459,10 @@ class MainWindow(QMainWindow):
             ys = np.loadtxt(fname)
             yss.append(ys)
 
-        N = len(yss[0])
-        xs = self.create_xs(N)
-        self.data = np.vstack((xs, *yss)).T
-        self.ts_are_calculated = True
+        self.data = np.array(yss).T
         
         self.fname = fnames[0]
         self.update_data()
-    
-    def create_xs(self, N):
-        xs = np.linspace(0, N, N) / (self.config["samplerate"] * 10**self.config["samplerateunit"])
-        return(xs)
         
     def save_file(self, fname=None):
         if self.spec_data is None:
@@ -543,10 +533,8 @@ class MainWindow(QMainWindow):
         self.fig.savefig(fname, **config["savefigure_kwargs"])
 
     def update_samplerate(self):
-        if not self.ts_are_calculated:
+        if self.data is None or config["samplerate"] == 0:
             return
-        self.data[:, 0] = self.create_xs(len(self.data[:, 0]))
-        
         self.update_data()
 
     def update_data(self, force_rescale=False):
