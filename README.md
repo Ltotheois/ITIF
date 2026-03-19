@@ -9,7 +9,7 @@ To do this, start the program and save the default values via *File > Save as de
 
 This file is in simple json format and can be edited with your editor of choice.
 
-Find the project on [PyPi](https://pypi.org/project/ItIf/) or install via
+You can find the project on [PyPi](https://pypi.org/project/ItIf/) or install it directly via
 ```
 pip install itif
 ```
